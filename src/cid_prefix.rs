@@ -1,6 +1,6 @@
 use cid::{CidGeneric, Version};
 
-use crate::multihasher::MultihasherTable;
+use crate::multihasher::{MultihasherError, MultihasherTable};
 
 const DAG_PB: u64 = 0x70;
 const SHA2_256: u64 = 0x12;
@@ -82,18 +82,23 @@ impl CidPrefix {
         }
     }
 
-    pub(crate) fn to_cid<const S: usize>(
+    pub(crate) async fn to_cid<const S: usize>(
         &self,
         hasher: &MultihasherTable<S>,
         data: &[u8],
-    ) -> Option<CidGeneric<S>> {
+    ) -> Result<Option<CidGeneric<S>>, MultihasherError> {
         if self.multihash_size > S {
-            return None;
+            return Ok(None);
         }
 
-        let hash = hasher.digest(self.multihash_code, data)?;
+        let Some(hash) = hasher.digest(self.multihash_code, data).await? else {
+            return Ok(None);
+        };
 
-        CidGeneric::new(self.version, self.codec, hash).ok()
+        let cid = CidGeneric::new(self.version, self.codec, hash)
+            .expect("prefix for cidv0 was initalized incorrectly");
+
+        Ok(Some(cid))
     }
 }
 

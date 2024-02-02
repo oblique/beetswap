@@ -6,6 +6,7 @@ license = "Apache-2.0"
 description = "Implementation of bitswap protocol for libp2p"
 
 [dependencies]
+async-trait = "0.1"
 asynchronous-codec = "0.7"
 blockstore = "0.1"
 bytes = "1"
