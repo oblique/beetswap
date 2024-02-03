@@ -11,17 +11,17 @@ use futures::{FutureExt, StreamExt};
 
 use crate::cid_prefix::CidPrefix;
 use crate::message::Codec;
-use crate::multihasher::MultihasherTable;
+use crate::multihasher::{MultihasherError, MultihasherTable};
 use crate::proto::message::mod_Message::BlockPresenceType;
 use crate::proto::message::mod_Message::Wantlist;
 
 /// Stream that reads `Message` and converts it to `IncomingMessage`.
 ///
-/// On any error `None` is returned to instruct `SelectAll` to drop the stream.
+/// On any error `None` is returned which instruct `SelectAll` to drop the stream.
 pub(crate) struct IncomingStream<const S: usize> {
     multihasher: Arc<MultihasherTable<S>>,
     stream: FramedRead<libp2p_swarm::Stream, Codec>,
-    processing: Fuse<BoxFuture<'static, Result<IncomingMessage<S>, String>>>,
+    processing: Fuse<BoxFuture<'static, Option<IncomingMessage<S>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -53,7 +53,7 @@ impl<const S: usize> IncomingStream<S> {
 
 impl<const S: usize> fmt::Debug for IncomingStream<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("IncomingStream")
+        f.write_str("IncomingStream { .. }")
     }
 }
 
@@ -67,9 +67,7 @@ impl<const S: usize> futures::Stream for IncomingStream<S> {
         loop {
             if !self.processing.is_terminated() {
                 match self.processing.poll_unpin(cx) {
-                    Poll::Ready(Ok(msg)) => return Poll::Ready(Some(msg)),
-                    // TODO: log error
-                    Poll::Ready(Err(_)) => return Poll::Ready(None),
+                    Poll::Ready(val) => return Poll::Ready(val),
                     Poll::Pending => return Poll::Pending,
                 }
             }
@@ -82,12 +80,16 @@ impl<const S: usize> futures::Stream for IncomingStream<S> {
 
             let multihasher = self.multihasher.clone();
 
+            // Convert `Message` to `IncomingMessage`. On error this future
+            // returns `None` which will cause the underlying stream to close.
             self.processing = async move {
                 let mut client = ClientMessage::default();
 
                 for block_presence in msg.blockPresences {
-                    let Ok(cid) = CidGeneric::try_from(block_presence.cid) else {
-                        continue;
+                    let cid = match CidGeneric::try_from(block_presence.cid) {
+                        Ok(cid) => cid,
+                        // TODO: log it
+                        Err(_) => return None,
                     };
 
                     client.block_presences.insert(cid, block_presence.type_pb);
@@ -95,15 +97,16 @@ impl<const S: usize> futures::Stream for IncomingStream<S> {
 
                 for payload in msg.payload {
                     let Some(cid_prefix) = CidPrefix::from_bytes(&payload.prefix) else {
-                        return Err("block.prefix not decodable".to_string());
+                        // TODO: log "block.prefix not decodable"
+                        return None;
                     };
 
-                    let Some(cid) = cid_prefix
-                        .to_cid(&multihasher, &payload.data)
-                        .await
-                        .map_err(|e| e.to_string())?
-                    else {
-                        continue;
+                    let cid = match cid_prefix.to_cid(&multihasher, &payload.data).await {
+                        Ok(cid) => cid,
+                        // TODO: log it
+                        Err(MultihasherError::UnknownMultihashCode) => continue,
+                        // TODO: log it
+                        Err(_) => return None,
                     };
 
                     client.blocks.insert(cid, payload.data);
@@ -113,7 +116,7 @@ impl<const S: usize> futures::Stream for IncomingStream<S> {
                     wantlist: msg.wantlist.unwrap_or_default(),
                 };
 
-                Ok(IncomingMessage { client, server })
+                Some(IncomingMessage { client, server })
             }
             .boxed()
             .fuse();

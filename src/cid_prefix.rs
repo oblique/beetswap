@@ -86,19 +86,17 @@ impl CidPrefix {
         &self,
         hasher: &MultihasherTable<S>,
         data: &[u8],
-    ) -> Result<Option<CidGeneric<S>>, MultihasherError> {
+    ) -> Result<CidGeneric<S>, MultihasherError> {
         if self.multihash_size > S {
-            return Ok(None);
+            return Err(MultihasherError::InvalidMultihashSize);
         }
 
-        let Some(hash) = hasher.digest(self.multihash_code, data).await? else {
-            return Ok(None);
-        };
+        let hash = hasher.hash(self.multihash_code, data).await?;
 
         let cid = CidGeneric::new(self.version, self.codec, hash)
             .expect("prefix for cidv0 was initalized incorrectly");
 
-        Ok(Some(cid))
+        Ok(cid)
     }
 }
 

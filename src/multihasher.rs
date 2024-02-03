@@ -8,17 +8,23 @@ use multihash_codetable::MultihashDigest;
 use crate::utils::convert_multihash;
 
 #[derive(Debug, thiserror::Error)]
-#[error("Multihasher error")]
-pub struct MultihasherError;
+pub enum MultihasherError {
+    #[error("Uknown multihash code")]
+    UnknownMultihashCode,
+    #[error("Invalid multihash size")]
+    InvalidMultihashSize,
+    #[error("Invalid data")]
+    InvalidData,
+}
 
 /// Trait for producing a custom [`Multihash`].
 #[async_trait]
 pub trait Multihasher<const S: usize> {
-    async fn digest(
+    async fn hash(
         &self,
         multihash_code: u64,
         input: &[u8],
-    ) -> Result<Option<Multihash<S>>, MultihasherError>;
+    ) -> Result<Multihash<S>, MultihasherError>;
 }
 
 /// [`Multihasher`] that uses [`multihash_codetable::Code`]
@@ -26,17 +32,17 @@ pub struct StandardMultihasher;
 
 #[async_trait]
 impl<const S: usize> Multihasher<S> for StandardMultihasher {
-    async fn digest(
+    async fn hash(
         &self,
         multihash_code: u64,
         input: &[u8],
-    ) -> Result<Option<Multihash<S>>, MultihasherError> {
-        let Ok(hasher) = multihash_codetable::Code::try_from(multihash_code) else {
-            // Not a fatal error
-            return Ok(None);
-        };
+    ) -> Result<Multihash<S>, MultihasherError> {
+        let hasher = multihash_codetable::Code::try_from(multihash_code)
+            .map_err(|_| MultihasherError::UnknownMultihashCode)?;
+
         let hash = hasher.digest(input);
-        Ok(convert_multihash(&hash))
+
+        convert_multihash(&hash).ok_or(MultihasherError::InvalidMultihashSize)
     }
 }
 
@@ -68,19 +74,19 @@ impl<const S: usize> MultihasherTable<S> {
         self.multihashers.push_front(Box::new(multihasher));
     }
 
-    pub(crate) async fn digest(
+    pub(crate) async fn hash(
         &self,
         multihash_code: u64,
         input: &[u8],
-    ) -> Result<Option<Multihash<S>>, MultihasherError> {
+    ) -> Result<Multihash<S>, MultihasherError> {
         for multihasher in &self.multihashers {
-            match multihasher.digest(multihash_code, input).await {
-                Ok(Some(hash)) => return Ok(Some(hash)),
-                Ok(None) => continue,
+            match multihasher.hash(multihash_code, input).await {
+                Ok(hash) => return Ok(hash),
+                Err(MultihasherError::UnknownMultihashCode) => continue,
                 Err(e) => return Err(e),
             }
         }
 
-        Ok(None)
+        Err(MultihasherError::UnknownMultihashCode)
     }
 }
