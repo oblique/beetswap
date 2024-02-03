@@ -542,6 +542,7 @@ impl<const S: usize> Drop for ClientConnectionHandler<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cid_prefix::CidPrefix;
     use crate::proto::message::mod_Message::{mod_Wantlist::WantType, Block, BlockPresence};
     use crate::test_utils::{cid_of_data, poll_fn_once};
     use blockstore::{Blockstore, InMemoryBlockstore};
@@ -900,8 +901,7 @@ mod tests {
 
     async fn new_client() -> ClientBehaviour<64, InMemoryBlockstore<64>> {
         let store = blockstore().await;
-        let multihasher = Arc::new(MultihasherTable::<64>::new());
-        ClientBehaviour::<64, _>::new(ClientConfig::default(), store, multihasher, None)
+        ClientBehaviour::<64, _>::new(ClientConfig::default(), store, None)
     }
 
     fn expect_send_wantlist_event(
