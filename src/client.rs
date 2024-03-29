@@ -9,7 +9,7 @@ use asynchronous_codec::FramedWrite;
 use blockstore::{Blockstore, BlockstoreError};
 use cid::CidGeneric;
 use fnv::FnvHashMap;
-use futures::future::{AbortHandle, Abortable, BoxFuture};
+use futures::future::{AbortHandle, Abortable};
 use futures::stream::FuturesUnordered;
 use futures::task::AtomicWaker;
 use futures::{FutureExt, SinkExt, StreamExt};
@@ -26,7 +26,7 @@ use crate::incoming_stream::ClientMessage;
 use crate::message::Codec;
 use crate::proto::message::mod_Message::{BlockPresenceType, Wantlist as ProtoWantlist};
 use crate::proto::message::Message;
-use crate::utils::{convert_cid, stream_protocol};
+use crate::utils::{box_future, convert_cid, stream_protocol, BoxFuture};
 use crate::wantlist::{Wantlist, WantlistState};
 use crate::StreamRequester;
 use crate::{Error, Event, Result, ToBehaviourEvent, ToHandlerEvent};
@@ -63,7 +63,7 @@ enum TaskResult<const S: usize> {
 #[derive(Debug)]
 pub(crate) struct ClientBehaviour<const S: usize, B>
 where
-    B: Blockstore + Send + Sync,
+    B: Blockstore,
 {
     store: Arc<B>,
     protocol: StreamProtocol,
@@ -71,7 +71,7 @@ where
     wantlist: Wantlist<S>,
     peers: FnvHashMap<PeerId, PeerState<S>>,
     cid_to_queries: FnvHashMap<CidGeneric<S>, SmallVec<[QueryId; 1]>>,
-    tasks: FuturesUnordered<BoxFuture<'static, TaskResult<S>>>,
+    tasks: FuturesUnordered<BoxFuture<TaskResult<S>>>,
     query_abort_handle: FnvHashMap<QueryId, AbortHandle>,
     next_query_id: u64,
     waker: Arc<AtomicWaker>,
@@ -97,7 +97,7 @@ pub enum SendingState {
 
 impl<const S: usize, B> ClientBehaviour<S, B>
 where
-    B: Blockstore + Send + Sync + 'static,
+    B: Blockstore + 'static,
 {
     pub(crate) fn new(config: ClientConfig, store: Arc<B>, protocol_prefix: Option<&str>) -> Self {
         let protocol = stream_protocol(protocol_prefix, "/ipfs/bitswap/1.2.0")
@@ -162,16 +162,13 @@ where
         let (handle, reg) = AbortHandle::new_pair();
 
         // Try to asynchronously get the CID from the store..
-        self.tasks.push(
-            async move {
-                match Abortable::new(store.get(&cid), reg).await {
-                    // ..And continue the procedure in `poll`. Missing CID will be handled there.
-                    Ok(res) => TaskResult::Get(query_id, cid, res),
-                    Err(_) => TaskResult::Cancelled,
-                }
+        self.tasks.push(box_future(async move {
+            match Abortable::new(store.get(&cid), reg).await {
+                // ..And continue the procedure in `poll`. Missing CID will be handled there.
+                Ok(res) => TaskResult::Get(query_id, cid, res),
+                Err(_) => TaskResult::Cancelled,
             }
-            .boxed(),
-        );
+        }));
 
         self.query_abort_handle.insert(query_id, handle);
     }
@@ -180,16 +177,13 @@ where
     fn schedule_store_put_many(&mut self, blocks: Vec<(CidGeneric<S>, Vec<u8>)>) {
         let store = self.store.clone();
 
-        self.tasks.push(
-            async move {
-                let res = store
-                    .put_many_keyed(blocks.clone().into_iter())
-                    .await
-                    .map(|_| blocks);
-                TaskResult::Set(res)
-            }
-            .boxed(),
-        );
+        self.tasks.push(box_future(async move {
+            let res = store
+                .put_many_keyed(blocks.clone().into_iter())
+                .await
+                .map(|_| blocks);
+            TaskResult::Set(res)
+        }));
     }
 
     pub(crate) fn get<const CS: usize>(&mut self, cid: &CidGeneric<CS>) -> QueryId {

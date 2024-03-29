@@ -8,9 +8,8 @@ use asynchronous_codec::FramedWrite;
 use blockstore::{Blockstore, BlockstoreError};
 use cid::CidGeneric;
 use fnv::{FnvHashMap, FnvHashSet};
-use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use futures::{FutureExt, SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt};
 use libp2p_core::upgrade::ReadyUpgrade;
 use libp2p_identity::PeerId;
 use libp2p_swarm::{
@@ -24,7 +23,7 @@ use crate::message::Codec;
 use crate::proto::message::{
     mod_Message::Block as ProtoBlock, mod_Message::Wantlist as ProtoWantlist, Message,
 };
-use crate::utils::stream_protocol;
+use crate::utils::{box_future, stream_protocol, BoxFuture};
 use crate::{Event, Result, StreamRequester, ToBehaviourEvent, ToHandlerEvent};
 
 type Sink = FramedWrite<libp2p_swarm::Stream, Codec>;
@@ -50,7 +49,7 @@ where
     /// list of events to be sent back to swarm when poll is called
     outgoing_event_queue: VecDeque<ToSwarm<Event, ToHandlerEvent>>,
     /// list of long running tasks, currently used to interact with the store
-    tasks: FuturesUnordered<BoxFuture<'static, TaskResult<S>>>,
+    tasks: FuturesUnordered<BoxFuture<TaskResult<S>>>,
 }
 
 enum TaskResult<const S: usize> {
@@ -133,7 +132,7 @@ impl<const S: usize> PeerWantlist<S> {
 
 impl<const S: usize, B> ServerBehaviour<S, B>
 where
-    B: Blockstore + Send + Sync + 'static,
+    B: Blockstore + 'static,
 {
     pub(crate) fn new(store: Arc<B>, protocol_prefix: Option<&str>) -> Self {
         let protocol = stream_protocol(protocol_prefix, "/ipfs/bitswap/1.2.0")
@@ -153,13 +152,10 @@ where
     fn schedule_store_get(&mut self, peer: Arc<PeerId>, cids: Vec<CidGeneric<S>>) {
         let store = self.store.clone();
 
-        self.tasks.push(
-            async move {
-                let result = get_multiple_cids_from_store(store, cids).await;
-                TaskResult::Get(peer, result)
-            }
-            .boxed(),
-        );
+        self.tasks.push(box_future(async move {
+            let result = get_multiple_cids_from_store(store, cids).await;
+            TaskResult::Get(peer, result)
+        }));
     }
 
     fn cancel_request(&mut self, peer: Arc<PeerId>, cid: CidGeneric<S>) {
